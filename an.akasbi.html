@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="ar">
+<head>
+<meta charset="utf-8" />
+<title>مجسمات 3D مع أبعاد وتسلسل الحساب</title>
+<style>
+  html,body { height:100%; margin:0; font-family: Arial, Helvetica, sans-serif; background:#eef9ff; }
+  #ui {
+    position: absolute; top: 12px; left: 12px; z-index: 20;
+    background: rgba(255,255,255,0.98); padding:14px; border-radius:10px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.12); width:350px;
+  }
+  label, select, input, button { display:block; width:100%; margin:8px 0; padding:8px; box-sizing:border-box; border-radius:6px; border:1px solid #cfdbe8; }
+  button { background:#207fb6; color:white; border:none; cursor:pointer; font-weight:600; }
+  button:hover{ background:#186b98; }
+  #result { margin-top:10px; padding:8px; background:#f7fbff; border-radius:8px; font-weight:700; text-align:center; }
+  #steps { margin-top:10px; padding:8px; background:#fffaf0; border-radius:8px; max-height:220px; overflow:auto; font-size:14px; line-height:1.5; white-space:pre-wrap; }
+  /* container for HTML labels that follow 3D points */
+  #labels { position: absolute; inset: 0; pointer-events: none; z-index: 30; }
+  .label {
+    position: absolute; transform: translate(-50%,-50%); background: rgba(0,0,0,0.75); color:#fff;
+    padding:4px 6px; border-radius:4px; font-size:13px; pointer-events:none;
+    white-space:nowrap;
+  }
+  .dim-line { stroke: #ff4d4d; stroke-width: 2px; } /* just for possible svg use */
+  @media (max-width:800px){ #ui { width:92%; left:4%; } }
+</style>
+</head>
+<body>
+
+<div id="ui">
+  <h3 style="margin:0 0 8px 0">حساب مساحة وحجم + عرض الأبعاد</h3>
+
+  <label>اختر المجسم:</label>
+  <select id="shape">
+    <option value="cube">مكعب</option>
+    <option value="cuboid">متوازي المستطيلات</option>
+    <option value="sphere">كرة</option>
+    <option value="cylinder">أسطوانة</option>
+    <option value="cone">مخروط</option>
+  </select>
+
+  <div id="inputs"></div>
+
+  <button id="calcBtn">احسب وأظهر الأبعاد</button>
+
+  <div id="result">المساحة — الحجم</div>
+
+  <div id="steps" aria-live="polite"></div>
+</div>
+
+<!-- حاوية للـ HTML labels (a, r, h) -->
+<div id="labels"></div>
+
+<!-- Three.js r146 (UMD) و OrbitControls (UMD) — يشتغل مباشرة عبر file:// -->
+<script src="https://cdn.jsdelivr.net/npm/three@0.146.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.146.0/examples/js/controls/OrbitControls.js"></script>
+
+<script>
+/*
+  كود: رسم مجسمات 3D + خطوط أبعاد + تسميات + خطوات حسابية
+  ملاحظات:
+  - نستخدم Three.js r146 (UMD) لنتفادى مشاكل التحميل عبر file://
+  - الملصقات (labels) مصنوعة بـ HTML وتوضع فوق نقاط 3D عبر تحويل إحداثياتها للشاشة
+*/
+
+(function(){
+
+// ======== متغيرات المشهد ========
+let scene, camera, renderer, controls;
+let currentMesh = null;
+let dimLines = [];    // مصفوفة لـ THREE.Line أو خطوط البُعد
+let htmlLabels = [];  // مصفوفة لـ DIVs الملصقة
+const labelsContainer = document.getElementById('labels');
+
+// ======== تهيئة 3D ========
+function init3D(){
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(window.devicePixelRatio || 1);
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0xeaf8ff);
+
+  camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 3000);
+  camera.position.set(220, 160, 200);
+  camera.lookAt(0, 60, 0);
+
+  controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+
+  // إضاءات
+  const dir = new THREE.DirectionalLight(0xffffff, 1.0);
+  dir.position.set(100, 200, 100);
+  scene.add(dir);
+  scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+
+  // شبكة أرضية
+  const grid = new THREE.GridHelper(400, 20, 0x9aa7b2, 0xcad5df);
+  scene.add(grid);
+
+  window.addEventListener('resize', onWindowResize, false);
+  animate();
+}
+
+function onWindowResize(){
+  camera.aspect = window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+// ======== إدارة المسح القديم ========
+function clearCurrent(){
+  // mesh
+  if(currentMesh){
+    scene.remove(currentMesh);
+    if(currentMesh.geometry) currentMesh.geometry.dispose();
+    if(currentMesh.material) currentMesh.material.dispose();
+    currentMesh = null;
+  }
+  // dimension lines
+  dimLines.forEach(line => {
+    scene.remove(line);
+    if(line.geometry) line.geometry.dispose();
+    if(line.material) line.material.dispose();
+  });
+  dimLines = [];
+  // html labels
+  htmlLabels.forEach(l => l.remove());
+  htmlLabels = [];
+}
+
+// ======== أدوات مساعدة للـ labels (HTML overlay) ========
+function createLabel(text, worldPosition){
+  const div = document.createElement('div');
+  div.className = 'label';
+  div.innerText = text;
+  labelsContainer.appendChild(div);
+  htmlLabels.push({el: div, pos: worldPosition.clone()});
+  return div;
+}
+
+// وظيفة تتحول نقطة 3D للعالم إلى إحداثيات شاشة وتضع الـ div
+function updateLabels(){
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+  for(const item of htmlLabels){
+    const pos = item.pos.clone();
+    pos.project(camera); // يضع القيم بنطاق -1..1
+    const x = (pos.x + 1) / 2 * width;
+    const y = (-pos.y + 1) / 2 * height;
+    item.el.style.left = `${x}px`;
+    item.el.style.top  = `${y}px`;
+  }
+}
+
+// ======== رسم خطوط البعد (ثلاثية الأبعاد، نقاط مطابقة لعالم المشهد) ========
+function drawDimLine(worldFrom, worldTo, color=0xff4d4d){
+  // نستخدم خطوط مع نقاط عالمية (scene root)
+  const points = [ worldFrom.clone(), worldTo.clone() ];
+  const geom = new THREE.BufferGeometry().setFromPoints(points);
+  const mat = new THREE.LineBasicMaterial({ color: color, linewidth: 2 });
+  const line = new THREE.Line(geom, mat);
+  scene.add(line);
+  dimLines.push(line);
+  return line;
+}
+
+// ======== تحويل نقاط محلية إلى عالمية عبر mesh ========
+function localToWorld(mesh, localVec){
+  // mesh.localToWorld يقوم بتعديل الـ Vector3 — لذا نعمل clone
+  const v = localVec.clone();
+  return mesh.localToWorld(v);
+}
+
+// ======== رسم المجسم + خطوط الأبعاد + تسميات ========
+function drawShapeWithDims(shape, dims){
+  clearCurrent();
+
+  const mat = new THREE.MeshPhongMaterial({ color: 0x2194ce, shininess: 80, flatShading: false });
+  let geom;
+
+  if(shape === 'cube'){
+    const a = dims.a;
+    geom = new THREE.BoxGeometry(a, a, a);
+    currentMesh = new THREE.Mesh(geo
